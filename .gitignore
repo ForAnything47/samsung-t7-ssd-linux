@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+state/
+runs/
+compatibility-runs/
+relock-runs/
+*-result*/
+*.log
+*.zip
+.env
+.env.*
