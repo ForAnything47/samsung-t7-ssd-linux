@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/bin/python3 -B -I /opt/samsung-t7-ssd-linux/t7.py "$@"

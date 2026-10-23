@@ -1,3 +1,11 @@
+from t7manager import device as device_api
+from t7manager import paths
+from t7manager import safety
+from t7manager.cli import main as cli
+from t7manager.operations import probe as probe_ops
+from t7manager.operations import unlock as unlock_ops
+import os
+import shutil
 import contextlib
 import io
 import json
@@ -5,17 +13,17 @@ import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import patch
-import t7 as app
+
 from test_single_native import INFO
 
 class Tests(unittest.TestCase):
     def invoke(self,args,usage=None,**kwargs):
         out=io.StringIO();err=io.StringIO()
-        with patch.object(app,'list_devices',return_value=[INFO]),patch.object(app,'local_output'),patch.object(app,'usage_snapshot',return_value=usage or {'idle':True}),contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
-            code=app.main([*args, "--lang", "ko"])
+        with patch.object(device_api,'list_devices',return_value=[INFO]),patch.object(safety,'local_output'),patch.object(safety,'usage_snapshot',return_value=usage or {'idle':True}),contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+            code=cli.main([*args, "--lang", "ko"])
         return code,out.getvalue(),err.getvalue()
     def test_dry_json_single_object_no_device_io(self):
-        with patch.object(app,'collect') as collect,patch.object(app,'execute_unlock') as unlock:
+        with patch.object(probe_ops,'collect') as collect,patch.object(unlock_ops,'execute_unlock') as unlock:
             for action in ('status','probe'):
                 code,out,err=self.invoke([action,'--json'])
                 self.assertEqual(code,0);self.assertFalse(err)
@@ -37,15 +45,15 @@ class Tests(unittest.TestCase):
                 out.mkdir(parents=True)
                 return {'complete':True,'commands':[{'name':'discovery-before','returncode':0}],
                         'before':{'locked':True,'locking_enabled':True,'comid':4100}}
-            with patch.object(app,'BASE',Path(tmp)),patch.object(app.os,'geteuid',return_value=0),patch.object(app.shutil,'which',return_value='/fake'),patch.object(app,'execute_unlock',side_effect=fake):
+            with patch.object(paths,'BASE',Path(tmp)),patch.object(os,'geteuid',return_value=0),patch.object(shutil,'which',return_value='/fake'),patch.object(unlock_ops,'execute_unlock',side_effect=fake):
                 code,out,err=self.invoke(['status','--execute','--json','--save-results'])
                 data=json.loads(out);self.assertEqual(code,0);self.assertFalse(err)
                 self.assertEqual(json.loads(Path(data['result_path']).read_text()),data)
     def test_failure_stage_from_result(self):
         with tempfile.TemporaryDirectory() as tmp:
-            def fake(info,out):
+            def fake(info,out,state=None):
                 out.mkdir(parents=True)
                 return {'complete':False,'error':'transport_failed_no_retry','commands':[{'name':'discovery','returncode':2}]}
-            with patch.object(app,'BASE',Path(tmp)),patch.object(app.os,'geteuid',return_value=0),patch.object(app.shutil,'which',return_value='/fake'),patch.object(app,'collect',side_effect=fake):
+            with patch.object(paths,'BASE',Path(tmp)),patch.object(os,'geteuid',return_value=0),patch.object(shutil,'which',return_value='/fake'),patch.object(probe_ops,'collect',side_effect=fake):
                 code,out,_=self.invoke(['probe','--execute','--save-results'])
                 self.assertEqual(code,1);self.assertIn('discovery',out);self.assertIn('반환 코드: 2',out)

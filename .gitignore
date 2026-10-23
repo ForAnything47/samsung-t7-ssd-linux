@@ -10,3 +10,5 @@ relock-runs/
 *.zip
 .env
 .env.*
+
+.venv-gui/

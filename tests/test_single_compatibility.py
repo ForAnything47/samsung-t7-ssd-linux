@@ -1,3 +1,5 @@
+from t7manager.cli import main as cli
+from t7manager.operations import probe as probe_ops
 from contextlib import nullcontext
 import json
 from pathlib import Path
@@ -5,8 +7,9 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-import t7 as probe
-from t7 import Stop, is_t7_family
+
+from t7manager.errors import Stop
+from t7manager.device import is_t7_family
 INFO = {'device': '/dev/sdz', 'model': 'PSSD T7 Touch', 'serials': ['TEST'], 'sysfs': 'fake'}
 RAW = (Path(__file__).parent / 'fixtures/discovery-locked.bin').read_bytes()
 
@@ -50,7 +53,7 @@ class Tests(unittest.TestCase):
         host = Host(**kwargs)
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / 'out'
-            result = probe.collect(INFO, out, host)
+            result = probe_ops.collect(INFO, out, host)
             self.assertEqual(result, json.loads((out / 'result.json').read_text()))
             return (result, host, {p.name: p.read_bytes() for p in out.iterdir()})
 
@@ -61,7 +64,7 @@ class Tests(unittest.TestCase):
         self.assertFalse(r['model_has_prior_validation'])
         self.assertEqual(len(h.calls), 2)
         self.assertEqual(files['discovery.bin'], RAW)
-        for cmd, (_, cdb, _) in zip(h.calls, probe.QUERIES):
+        for cmd, (_, cdb, _) in zip(h.calls, probe_ops.QUERIES):
             self.assertEqual(cmd[-len(cdb):], [f'{b:02x}' for b in cdb])
             self.assertIn('--readonly', cmd)
             self.assertFalse(any((x.startswith('--send') for x in cmd)))
@@ -89,7 +92,7 @@ class Tests(unittest.TestCase):
     def test_changed_comid_is_not_unlock_approval(self):
         raw = bytearray(RAW)
         raw[132:134] = b'\x10\x05'
-        r = probe.analyze(bytes(raw), 'PSSD T7 Shield')
+        r = probe_ops.analyze(bytes(raw), 'PSSD T7 Shield')
         self.assertEqual(r['classification'], 'parsed_profile_differs')
         self.assertFalse(r['unlock_compatibility_proven'])
 
@@ -101,14 +104,14 @@ class Tests(unittest.TestCase):
 
     def test_dry_run_and_list_do_not_collect(self):
         for args in ([], ['--list']):
-            with patch('t7.list_devices', return_value=[INFO]), patch('t7.local_output'), patch('t7.usage_snapshot', return_value={'idle': True}), patch('t7.collect') as collect, patch('builtins.print'):
-                self.assertEqual(probe.main(['list'] if '--list' in args else ['probe', *args]), 0)
+            with patch('t7manager.device.list_devices', return_value=[INFO]), patch('t7manager.safety.local_output'), patch('t7manager.safety.usage_snapshot', return_value={'idle': True}), patch('t7manager.operations.probe.collect') as collect, patch('builtins.print'):
+                self.assertEqual(cli.main(['list'] if '--list' in args else ['probe', *args]), 0)
                 collect.assert_not_called()
 
     def test_ambiguous_candidates_and_busy_never_collect(self):
         for devices, usage in [([INFO, INFO], {'idle': True}), ([INFO], {'idle': False})]:
-            with patch('t7.list_devices', return_value=devices), patch('t7.local_output'), patch('t7.usage_snapshot', return_value=usage), patch('t7.collect') as collect, patch('builtins.print'):
-                self.assertEqual(probe.main(['probe', '--execute']), 1)
+            with patch('t7manager.device.list_devices', return_value=devices), patch('t7manager.safety.local_output'), patch('t7manager.safety.usage_snapshot', return_value=usage), patch('t7manager.operations.probe.collect') as collect, patch('builtins.print'):
+                self.assertEqual(cli.main(['probe', '--execute']), 1)
                 collect.assert_not_called()
 if __name__ == '__main__':
     unittest.main()

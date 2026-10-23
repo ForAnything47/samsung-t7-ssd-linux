@@ -1,3 +1,8 @@
+from t7manager import device as device_api
+from t7manager import records
+from t7manager import safety
+from t7manager.cli import main as cli
+from t7manager.operations import unlock as unlock_ops
 from contextlib import nullcontext
 import json
 from pathlib import Path
@@ -5,9 +10,12 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
-import t7 as t7
-from t7 import Stop, device_serials
-from t7 import frame, byte_atom, uint
+
+from t7manager.errors import Stop
+from t7manager.device import device_serials
+from t7manager.protocol import frame
+from t7manager.protocol import byte_atom
+from t7manager.protocol import uint
 SECRET = b'FakeOnly!9'
 INFO = {'device': '/dev/sdz', 'serials': ['TEST'], 'sysfs': 'old', 'model': 'PSSD T7 Shield'}
 NEW = {**INFO, 'device': '/dev/sdy', 'sysfs': 'new'}
@@ -100,7 +108,7 @@ class Tests(unittest.TestCase):
             if pending:
                 (state / 'pending.json').write_text('{}')
             out = root / 'out'
-            r = t7.execute_unlock(INFO, 'TEST', action, out, state, h)
+            r = unlock_ops.execute_unlock(INFO, 'TEST', action, out, state, h)
             for p in root.rglob('*.json'):
                 text = p.read_bytes()
                 self.assertNotIn(SECRET, text)
@@ -108,6 +116,14 @@ class Tests(unittest.TestCase):
             self.assertEqual(json.loads((out / 'result.json').read_text()), r)
             marker = (state / 'pending.json').exists()
         return (r, h, marker)
+
+    def test_password_cancel_reports_input_stage(self):
+        with patch.object(FakeHost, 'password', side_effect=Stop('password_input_cancelled_no_auth_sent')):
+            report, host, pending = self.case()
+        self.assertEqual(report['error_stage'], 'password input')
+        self.assertEqual([command['name'] for command in report['commands']], ['discovery-before'])
+        self.assertFalse(report['changes_may_have_occurred'])
+        self.assertFalse(pending)
 
     def test_full_success(self):
         r, h, m = self.case()
@@ -130,7 +146,7 @@ class Tests(unittest.TestCase):
                 r, h, m = self.case(fail=i)
                 self.assertFalse(r['complete'])
                 self.assertEqual(len(h.calls), i + 1)
-                self.assertEqual(m, i >= 2)
+                self.assertFalse(m)
 
     def test_all_timeouts_stop(self):
         for i in range(28):
@@ -165,7 +181,7 @@ class Tests(unittest.TestCase):
     def test_wait_failure_does_not_retry_e8(self):
         r, h, m = self.case(waitfail=True)
         self.assertFalse(r['complete'])
-        self.assertTrue(m)
+        self.assertFalse(m)
         self.assertEqual(len(h.calls), 27)
 
     def test_status_readonly_without_password(self):
@@ -183,9 +199,9 @@ class Tests(unittest.TestCase):
 
     def test_pending_blocks_unlock_but_allows_status(self):
         r, h, m = self.case(pending=True)
-        self.assertFalse(r['complete'])
-        self.assertEqual(h.calls, [])
-        self.assertTrue(m)
+        self.assertTrue(r['complete'])
+        self.assertEqual(len(h.calls), 28)
+        self.assertTrue(m)  # Legacy record is preserved, but does not block.
         r, h, m = self.case(action='status', pending=True)
         self.assertTrue(r['complete'])
         self.assertTrue(m)
@@ -196,23 +212,23 @@ class Tests(unittest.TestCase):
             state = root / 'state'
             state.mkdir()
             for i in range(2):
-                r = t7.execute_unlock(INFO, 'TEST', 'unlock', root / str(i), state, FakeHost())
+                r = unlock_ops.execute_unlock(INFO, 'TEST', 'unlock', root / str(i), state, FakeHost())
                 self.assertTrue(r['complete'])
                 self.assertFalse((state / 'pending.json').exists())
 
     def test_concurrent_runs_blocked(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with t7.run_lock(Path(tmp)):
+            with records.run_lock(Path(tmp)):
                 with self.assertRaises(Stop):
-                    with t7.run_lock(Path(tmp)):
+                    with records.run_lock(Path(tmp)):
                         pass
 
     def test_selector_no_fallback(self):
-        self.assertEqual(t7.select('TEST', lambda _: INFO), INFO)
+        self.assertEqual(device_api.select('TEST', lambda _: INFO), INFO)
         with self.assertRaises(Stop):
-            t7.select('OTHER', lambda _: INFO)
+            device_api.select('OTHER', lambda _: INFO)
         with self.assertRaises(Stop):
-            t7.select('TEST', lambda _: None)
+            device_api.select('TEST', lambda _: None)
 
     def test_nearest_usb_serial_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -230,50 +246,36 @@ class Tests(unittest.TestCase):
             self.assertEqual(device_serials(node), [])
 
     def test_default_dry_run(self):
-        with patch('t7.list_devices', return_value=[INFO]), patch('t7.select', return_value=INFO), patch('t7.usage_snapshot', return_value={'idle': True}), patch('t7.local_output', return_value='/dev/nvme0n1p9'), patch('t7.execute_unlock') as run, patch('builtins.print'):
-            self.assertEqual(t7.main(['--json']), 0)
+        with patch('t7manager.device.list_devices', return_value=[INFO]), patch('t7manager.device.select', return_value=INFO), patch('t7manager.safety.usage_snapshot', return_value={'idle': True}), patch('t7manager.safety.local_output', return_value='/dev/nvme0n1p9'), patch('t7manager.operations.unlock.execute_unlock') as run, patch('builtins.print'):
+            self.assertEqual(cli.main(['--json']), 0)
             run.assert_not_called()
 
 class ScannerTests(unittest.TestCase):
 
     def test_duplicate_matching_devices_rejected(self):
-        import t7 as support
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for name in ('sdz', 'sdy'):
                 p = root / name / 'device'
                 p.mkdir(parents=True)
                 (p / 'model').write_text('PSSD T7 Shield')
-            with patch('t7.Path', side_effect=lambda x: root if x == '/sys/class/block' else Path(x)), patch('t7.identity', return_value=INFO):
+            with patch('t7manager.device.Path', side_effect=lambda x: root if x == '/sys/class/block' else Path(x)), patch('t7manager.device.identity', return_value=INFO):
                 with self.assertRaises(Stop):
-                    support.find_device('TEST')
+                    device_api.find_device('TEST')
 
     def test_unique_matching_device_and_missing_serial(self):
-        import t7 as support
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             p = root / 'sdz/device'
             p.mkdir(parents=True)
             (p / 'model').write_text('PSSD T7 Shield')
-            with patch('t7.Path', side_effect=lambda x: root if x == '/sys/class/block' else Path(x)), patch('t7.identity', return_value=INFO):
-                self.assertEqual(support.find_device('TEST'), INFO)
-                self.assertIsNone(support.find_device('missing'))
+            with patch('t7manager.device.Path', side_effect=lambda x: root if x == '/sys/class/block' else Path(x)), patch('t7manager.device.identity', return_value=INFO):
+                self.assertEqual(device_api.find_device('TEST'), INFO)
+                self.assertIsNone(device_api.find_device('missing'))
 
-    def test_failed_attempt_blocks_new_output_directory(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            state = root / 'state'
-            state.mkdir()
-            r = t7.execute_unlock(INFO, 'TEST', 'unlock', root / 'first', state, FakeHost(timeout=22))
-            self.assertFalse(r['complete'])
-            host = FakeHost()
-            r = t7.execute_unlock(INFO, 'TEST', 'unlock', root / 'second', state, host)
-            self.assertFalse(r['complete'])
-            self.assertEqual(host.calls, [])
 MOUNT = {'device': '/dev/sdz1', 'device_number': '8:1', 'mountpoint': '/media/T7', 'root': '/', 'fstype': 'vfat', 'partition': True, 'size_bytes': 34537472}
 
 class MountedHost(FakeHost):
-
     def __init__(self, mode='ok'):
         super().__init__()
         self.mode = mode
@@ -322,7 +324,7 @@ class AutoUnmountTests(unittest.TestCase):
             root = Path(tmp)
             state = root / 'state'
             state.mkdir()
-            result = t7.execute_unlock(INFO, 'TEST', action, root / 'out', state, host)
+            result = unlock_ops.execute_unlock(INFO, 'TEST', action, root / 'out', state, host)
         return (result, host)
 
     def test_locked_mount_unmount_then_full_unlock(self):
@@ -365,8 +367,8 @@ class AutoUnmountTests(unittest.TestCase):
 
     def test_dry_run_plans_without_io(self):
         usage = MountedHost().usage('/dev/sdz')
-        with patch('t7.list_devices', return_value=[INFO]), patch('t7.select', return_value=INFO), patch('t7.usage_snapshot', return_value=usage), patch('t7.local_output', return_value='/dev/nvme0n1p9'), patch('t7.execute_unlock') as run, patch('builtins.print') as output:
-            self.assertEqual(t7.main(['--json']), 0)
+        with patch('t7manager.device.list_devices', return_value=[INFO]), patch('t7manager.device.select', return_value=INFO), patch('t7manager.safety.usage_snapshot', return_value=usage), patch('t7manager.safety.local_output', return_value='/dev/nvme0n1p9'), patch('t7manager.operations.unlock.execute_unlock') as run, patch('builtins.print') as output:
+            self.assertEqual(cli.main(['--json']), 0)
             run.assert_not_called()
             data = json.loads(output.call_args[0][0])
             self.assertEqual(data['planned_unmount'], '/dev/sdz1')
@@ -376,35 +378,35 @@ class AutoUnmountTests(unittest.TestCase):
     def test_bind_and_multiple_mounts_rejected(self):
         usage = MountedHost().usage('/dev/sdz')
         usage['mounts'] = [{**MOUNT, 'root': '/folder'}]
-        self.assertIsNone(t7.auto_unmount_candidate(usage))
+        self.assertIsNone(safety.auto_unmount_candidate(usage))
         usage['mounts'] = [MOUNT, MOUNT]
-        self.assertIsNone(t7.auto_unmount_candidate(usage))
+        self.assertIsNone(safety.auto_unmount_candidate(usage))
 
 class GeneralHostTests(unittest.TestCase):
 
     def test_automatic_selection_requires_unique_serial(self):
-        with patch('t7.list_devices', return_value=[INFO]):
-            self.assertEqual(t7.select(None, lambda serial: INFO if serial == 'TEST' else None), INFO)
+        with patch('t7manager.device.list_devices', return_value=[INFO]):
+            self.assertEqual(device_api.select(None, lambda serial: INFO if serial == 'TEST' else None), INFO)
         for candidates in ([], [INFO, NEW], [{**INFO, 'serials': []}]):
-            with patch('t7.list_devices', return_value=candidates):
+            with patch('t7manager.device.list_devices', return_value=candidates):
                 with self.assertRaises(Stop):
-                    t7.select(None, lambda _: INFO)
+                    device_api.select(None, lambda _: INFO)
 
     def test_list_and_ambiguous_selection_never_execute(self):
         for args, candidates, expected in [(['--list'], [INFO], 0), ([], [INFO, NEW], 1), (['--execute'], [INFO, NEW], 1)]:
-            with patch('t7.list_devices', return_value=candidates), patch('t7.execute_unlock') as execute, patch('t7.local_output') as output, patch('builtins.print'):
-                self.assertEqual(t7.main(args), expected)
+            with patch('t7manager.device.list_devices', return_value=candidates), patch('t7manager.operations.unlock.execute_unlock') as execute, patch('t7manager.safety.local_output') as output, patch('builtins.print'):
+                self.assertEqual(cli.main(args), expected)
                 execute.assert_not_called()
                 output.assert_not_called()
 
     def test_explicit_serial_preserved(self):
-        with patch('t7.list_devices', return_value=[INFO, {**NEW, 'serials': ['OTHER']}]), patch('t7.usage_snapshot', return_value={'idle': True}), patch('t7.local_output', return_value='/dev/other'), patch('t7.execute_unlock') as execute, patch('builtins.print') as output:
-            self.assertEqual(t7.main(['--serial', 'TEST', '--json']), 0)
+        with patch('t7manager.device.list_devices', return_value=[INFO, {**NEW, 'serials': ['OTHER']}]), patch('t7manager.safety.usage_snapshot', return_value={'idle': True}), patch('t7manager.safety.local_output', return_value='/dev/other'), patch('t7manager.operations.unlock.execute_unlock') as execute, patch('builtins.print') as output:
+            self.assertEqual(cli.main(['--serial', 'TEST', '--json']), 0)
             self.assertEqual(json.loads(output.call_args[0][0])['identity'], INFO)
             execute.assert_not_called()
 
     def test_block_ancestry_partition_stack_and_unknown(self):
-        from t7 import backing_disks
+        from t7manager.safety import backing_disks
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             links = root / 'links'
@@ -434,7 +436,7 @@ class GeneralHostTests(unittest.TestCase):
                 backing_disks('253:0', links)
 
     def test_output_target_network_unknown_and_separate_disk(self):
-        from t7 import local_output
+        from t7manager.safety import local_output
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / 'target'
@@ -444,7 +446,7 @@ class GeneralHostTests(unittest.TestCase):
             info = {**INFO, 'sysfs': str(target)}
             for fstype, disks, allowed in [('ext4', {str(other)}, True), ('ext4', {str(target)}, False), ('xfs', {str(other), str(target)}, False), ('nfs', {str(other)}, False), ('overlay', {str(other)}, False)]:
                 result = subprocess.CompletedProcess([], 0, json.dumps({'filesystems': [{'source': '/dev/mapper/data', 'fstype': fstype, 'maj:min': '253:0'}]}), '')
-                with patch('t7.subprocess.run', return_value=result), patch('t7.backing_disks', return_value=disks):
+                with patch('subprocess.run', return_value=result), patch('t7manager.safety.backing_disks', return_value=disks):
                     if allowed:
                         self.assertEqual(local_output(root / 'new/log', info), '/dev/mapper/data')
                     else:
@@ -452,7 +454,7 @@ class GeneralHostTests(unittest.TestCase):
                             local_output(root / 'new/log', info)
 
     def test_btrfs_checks_every_device_and_symlink_destination(self):
-        from t7 import local_output
+        from t7manager.safety import local_output
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             target = root / 'target'
@@ -467,7 +469,7 @@ class GeneralHostTests(unittest.TestCase):
             link = root / 'log'
             link.symlink_to(other, target_is_directory=True)
             result = subprocess.CompletedProcess([], 0, json.dumps({'filesystems': [{'source': '/dev/sdb1[/home]', 'fstype': 'btrfs', 'uuid': 'abc-123'}]}), '')
-            with patch('t7.Path', side_effect=lambda path: root / 'btrfs' if path == '/sys/fs/btrfs' else Path(path)), patch('t7.subprocess.run', return_value=result) as run, patch('t7.backing_disks', side_effect=[{str(other)}, {str(target)}]) as backing:
+            with patch('t7manager.safety.Path', side_effect=lambda path: root / 'btrfs' if path == '/sys/fs/btrfs' else Path(path)), patch('subprocess.run', return_value=result) as run, patch('t7manager.safety.backing_disks', side_effect=[{str(other)}, {str(target)}]) as backing:
                 with self.assertRaises(Stop):
                     local_output(link / 'new', {**INFO, 'sysfs': str(target)})
                 self.assertEqual(backing.call_count, 2)

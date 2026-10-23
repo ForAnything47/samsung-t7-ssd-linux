@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=T7 SSD Password Manager
+Comment=Unofficial Samsung T7 SSD password management; not affiliated with Samsung
+Exec=t7-gui
+Icon=drive-removable-media
+Terminal=false
+Categories=System;Utility;
+Keywords=Samsung;T7;SSD;Password;

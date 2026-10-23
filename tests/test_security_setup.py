@@ -1,4 +1,13 @@
 """Synthetic stateful SSD and fault injection; never accesses a real device."""
+from t7manager import device as device_api
+from t7manager import errors
+from t7manager import paths
+from t7manager import protocol
+from t7manager import records
+from t7manager import safety
+from t7manager.cli import main as cli
+from t7manager.operations import security as security_ops
+from t7manager.operations import unlock as unlock_ops
 
 import json
 import subprocess
@@ -7,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import t7 as app
+
 from test_single_native import FakeHost, INFO, START, UNLOCKED, LOCKED
 
 DEFAULT = bytes(range(32))
@@ -56,11 +65,11 @@ class SetupHost(FakeHost):
             if bytes.fromhex("000000000000ff02") in payload:
                 raw = START
             elif payload.startswith(b"\xf8\xa8" + bytes.fromhex("0000000b00008402")):
-                raw = app.frame(
+                raw = protocol.frame(
                     b"\xf0\xf0\xf2\x03"
-                    + app.byte_atom(DEFAULT)
+                    + protocol.byte_atom(DEFAULT)
                     + b"\xf3\xf1\xf1\xf9"
-                    + app.TAIL,
+                    + protocol.TAIL,
                     4100,
                     291,
                     1,
@@ -71,30 +80,30 @@ class SetupHost(FakeHost):
             ):
                 data = bytearray(144)
                 data[2] = 3 if self.snapshot == UNLOCKED else 2
-                raw = app.frame(
-                    b"\xf0" + app.byte_atom(bytes(data)) + b"\xf1\xf9" + app.TAIL,
+                raw = protocol.frame(
+                    b"\xf0" + protocol.byte_atom(bytes(data)) + b"\xf1\xf9" + protocol.TAIL,
                     4100,
                     291,
                     1,
                 )
             elif payload[0] in (251, 252):
-                raw = app.frame(payload[:2], 4100, 291, 1)
+                raw = protocol.frame(payload[:2], 4100, 291, 1)
                 if payload[0] == 252:
                     self.committed = True
                     self.snapshot = (
                         DISABLED if self.action == "remove-password" else UNLOCKED
                     )
             elif payload[0] == 250:
-                raw = app.frame(b"\xfa", 4100, 291, 1)
+                raw = protocol.frame(b"\xfa", 4100, 291, 1)
             else:
-                raw = app.frame(b"\xf0\xf1\xf9" + app.TAIL, 4100, 291, 1)
+                raw = protocol.frame(b"\xf0\xf1\xf9" + protocol.TAIL, 4100, 291, 1)
             raw = raw.ljust(2048, b"\0")
         return subprocess.CompletedProcess(cmd, 0, raw, b"")
 
 
 class Tests(unittest.TestCase):
     def run_case(self, action, state, host, out=None):
-        return app.execute_security_setup(action, INFO, "TEST", out, state, host)
+        return security_ops.execute_security_setup(action, INFO, "TEST", out, state, host)
 
     def test_success_both_actions_no_secret_saved(self):
         for action in ("set-password", "remove-password"):
@@ -139,16 +148,9 @@ class Tests(unittest.TestCase):
                         result = self.run_case(action, state, host)
                         self.assertFalse(result["complete"], result)
                         self.assertEqual(len(host.calls), index + 1)
-                        self.assertEqual((state / "pending.json").exists(), index >= 2)
+                        self.assertFalse((state / "pending.json").exists())
+                        self.assertTrue(list((state / "logs").glob("*.json")))
                         self.assertNotIn(PASSWORD.decode(), json.dumps(result))
-                        if index >= 2:
-                            before = (state / "pending.json").read_bytes()
-                            second = SetupHost(action)
-                            self.run_case(action, state, second)
-                            self.assertEqual(second.calls, [])
-                            self.assertEqual(
-                                (state / "pending.json").read_bytes(), before
-                            )
 
     def test_input_cancel_no_pending_next_invocation_works(self):
         for action in ("set-password", "remove-password"):
@@ -173,10 +175,10 @@ class Tests(unittest.TestCase):
             def run(self, cmd, **kwargs):
                 reply = super().run(cmd, **kwargs)
                 if len(self.calls) == 4:
-                    raw = app.frame(
+                    raw = protocol.frame(
                         b"\xf8"
-                        + app.byte_atom(bytes.fromhex("00000000000000ff"))
-                        + app.byte_atom(bytes.fromhex("000000000000ff03"))
+                        + protocol.byte_atom(bytes.fromhex("00000000000000ff"))
+                        + protocol.byte_atom(bytes.fromhex("000000000000ff03"))
                         + b"\xf0\x01\x00\xf1\xf9\xf0\x01\x00\x00\xf1",
                         4100,
                     )
@@ -212,19 +214,19 @@ class Tests(unittest.TestCase):
 
     def test_default_binary_length_and_user_policy_separate(self):
         for value in (b"", b"a" * 16, b"a" * 31, b"a" * 33):
-            with self.assertRaises(app.Stop):
-                app.security_auth_payload(value, default=True)
-        self.assertIn(DEFAULT, app.security_auth_payload(DEFAULT, default=True))
+            with self.assertRaises(errors.Stop):
+                protocol.security_auth_payload(value, default=True)
+        self.assertIn(DEFAULT, protocol.security_auth_payload(DEFAULT, default=True))
         with self.assertRaises(ValueError):
-            app.start_session(DEFAULT)
+            protocol.start_session(DEFAULT)
         for target in (19, 20):
-            self.assertIn(DEFAULT, app.default_pin_set(target, DEFAULT))
-        with self.assertRaises(app.Stop):
-            app.default_pin_set(17, DEFAULT)
+            self.assertIn(DEFAULT, protocol.default_pin_set(target, DEFAULT))
+        with self.assertRaises(errors.Stop):
+            protocol.default_pin_set(17, DEFAULT)
 
     def test_recovered_write_order_and_wire_constants(self):
-        setup = app.security_mutations("set-password", PASSWORD)
-        remove = app.security_mutations("remove-password", DEFAULT)
+        setup = protocol.security_mutations("set-password", PASSWORD)
+        remove = protocol.security_mutations("remove-password", DEFAULT)
         self.assertEqual(
             [name for name, _ in setup],
             [
@@ -276,7 +278,7 @@ class Tests(unittest.TestCase):
                 self.assertTrue(result["recovery_required"])
 
     def test_final_report_error_preserves_outcome(self):
-        original = app.save
+        original = records.save
 
         def save(path, value):
             if path.name == "result.json" and value.get("complete"):
@@ -284,7 +286,7 @@ class Tests(unittest.TestCase):
             original(path, value)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(
-            app, "save", side_effect=save
+            records, "save", side_effect=save
         ):
             state = Path(tmp)
             result = self.run_case(
@@ -297,14 +299,14 @@ class Tests(unittest.TestCase):
     def test_status_reports_disabled_without_weakening_unlock(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp)
-            result = app.execute_unlock(
+            result = unlock_ops.execute_unlock(
                 INFO, "TEST", "status", None, state, SetupHost("set-password")
             )
             self.assertTrue(result["complete"], result)
             self.assertTrue(result["before"]["locking_enabled"])
             self.assertEqual(len(result["commands"]), 1)
             host = SetupHost("set-password")
-            result = app.execute_unlock(INFO, "TEST", "unlock", None, state, host)
+            result = unlock_ops.execute_unlock(INFO, "TEST", "unlock", None, state, host)
             self.assertFalse(result["complete"])
             self.assertEqual(len(host.calls), 1)
 
@@ -313,18 +315,18 @@ class Tests(unittest.TestCase):
         import io
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(
-            app, "BASE", Path(tmp)
-        ), patch.object(app, "list_devices", return_value=[INFO]), patch.object(
-            app, "local_output"
+            paths, "BASE", Path(tmp)
+        ), patch.object(device_api, "list_devices", return_value=[INFO]), patch.object(
+            safety, "local_output"
         ), patch.object(
-            app, "usage_snapshot", return_value={"idle": True}
+            safety, "usage_snapshot", return_value={"idle": True}
         ), patch.object(
-            app, "execute_security_setup"
+            security_ops, "execute_security_setup"
         ) as execute:
             for action in ("set-password", "remove-password"):
                 stream = io.StringIO()
                 with contextlib.redirect_stdout(stream):
-                    code = app.main([action, "--json"])
+                    code = cli.main([action, "--json"])
                 result = json.loads(stream.getvalue())
                 self.assertEqual(code, 0)
                 self.assertEqual(result["action"], action)
@@ -343,10 +345,10 @@ class Tests(unittest.TestCase):
                     and "--request=2048" in cmd
                     and bytes.fromhex("000000000000ff02") in self.payload
                 ):
-                    raw = app.frame(
+                    raw = protocol.frame(
                         b"\xf8"
-                        + app.byte_atom(bytes.fromhex("00000000000000ff"))
-                        + app.byte_atom(bytes.fromhex("000000000000ff03"))
+                        + protocol.byte_atom(bytes.fromhex("00000000000000ff"))
+                        + protocol.byte_atom(bytes.fromhex("000000000000ff03"))
                         + b"\xf0\x01\x00\xf1\xf9\xf0\x01\x00\x00\xf1",
                         4100,
                     )
@@ -360,6 +362,7 @@ class Tests(unittest.TestCase):
             self.assertEqual(result["error"], "credential_verification_rejected")
             self.assertTrue(result["commit_confirmed"])
             self.assertTrue(result["recovery_required"])
-            pending = json.loads((Path(tmp) / "pending.json").read_text())
-            self.assertTrue(pending["changes_may_have_occurred"])
-            self.assertTrue(pending["commit_confirmed"])
+            self.assertFalse((Path(tmp) / "pending.json").exists())
+            logs = list((Path(tmp) / "logs").glob("*.json"))
+            self.assertEqual(len(logs), 1)
+            self.assertTrue(json.loads(logs[0].read_text())["commit_confirmed"])
