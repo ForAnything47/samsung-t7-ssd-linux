@@ -175,6 +175,28 @@ def read_log_record(directory_fd, name):
             os.close(fd)
 
 
+def validate_log_display_fields(record):
+    """Reject malformed display fields while allowing missing/unknown fields.
+
+    Logs are evidence: validation never repairs or deletes the source file.
+    This is a shape check, not a claim that the recorded device state is true.
+    """
+    for key in ("action", "outcome", "error", "error_stage", "classification",
+                "updated_at"):
+        if key in record and not isinstance(record[key], str):
+            raise errors.Stop("invalid_operation_log_fields")
+    for key in ("identity", "identity_after", "before", "after", "discovery",
+                "inquiry", "diagnostic", "launch_diagnostic"):
+        if key in record and not isinstance(record[key], dict):
+            raise errors.Stop("invalid_operation_log_fields")
+    for key in ("commands", "partitions", "candidates", "features"):
+        if key in record and (not isinstance(record[key], list)
+                              or not all(isinstance(item, dict) for item in record[key])):
+            raise errors.Stop("invalid_operation_log_fields")
+    if "complete" in record and type(record["complete"]) is not bool:
+        raise errors.Stop("invalid_operation_log_fields")
+
+
 def read_operation_logs(info, day=None):
     """Read root-owned logs for one selected SSD; never touch the SSD."""
     if day is not None:
@@ -201,6 +223,8 @@ def read_operation_logs(info, day=None):
             # Never follow an unsafe entry or repair/delete it during review.
             try:
                 record = read_log_record(fd, name)
+                if isinstance(record, dict):
+                    validate_log_display_fields(record)
             except (OSError, errors.Stop, ValueError) as exc:
                 skipped_count += 1
                 if len(warnings) < 100:

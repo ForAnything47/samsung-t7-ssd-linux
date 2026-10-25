@@ -158,3 +158,32 @@ class OperationLogTests(unittest.TestCase):
             self.assertEqual(target.read_text(), 'private target')
             # An explicitly selected date is equally resilient.
             self.assertEqual(len(records.read_operation_logs(info, result['day'])['entries']), 1)
+
+    def test_invalid_display_fields_are_skipped_without_changing_evidence(self):
+        with tempfile.TemporaryDirectory() as directory, patch('t7manager.paths.BASE', Path(directory)):
+            info = {'model': 'PSSD T7 Shield', 'serials': ['ONE']}
+            state = records.state_for_identity(info)
+            good = {'action': 'status', 'complete': True, 'identity': info, 'commands': []}
+            records.operation_checkpoint(state, good)
+            source = json.loads(Path(good['log_path']).read_text())
+            malformed = [('before', 'invalid'), ('after', [1]), ('outcome', 42),
+                         ('partitions', ['bad']), ('diagnostic', 'bad'),
+                         ('updated_at', []), ('complete', 'false')]
+            for key, value in malformed:
+                with self.subTest(field=key):
+                    bad = dict(source, run_id='a' * 32)
+                    bad[key] = value
+                    path = state / 'logs' / ('a' * 32 + '.json')
+                    original = json.dumps(bad).encode()
+                    path.write_bytes(original)
+                    path.chmod(0o600)
+                    result = records.read_operation_logs(info)
+                    self.assertEqual(len(result['entries']), 1)
+                    self.assertEqual(result['entries'][0]['run_id'], good['run_id'])
+                    self.assertEqual(result['skipped_count'], 1)
+                    self.assertEqual(result['warnings'][0]['reason'], 'invalid_operation_log_fields')
+                    self.assertEqual(path.read_bytes(), original)
+
+    def test_display_validation_accepts_missing_and_future_fields(self):
+        records.validate_log_display_fields({'action': 'status', 'complete': False,
+                                             'future_field': {'anything': [1]}})

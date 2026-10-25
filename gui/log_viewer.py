@@ -115,8 +115,16 @@ class LogViewer(QDialog):
             self.raw.clear()
             return
         entry = self.entries[row]
-        text = summary(entry.get('action', ''), entry)
-        self.human.setPlainText(text + '\n\nLog ID: ' + entry.get('run_id', '?')
-                                + '\nStarted: ' + entry.get('started_at', '?')
-                                + '\nLast update: ' + entry.get('updated_at', '?'))
+        # Keep the raw evidence available even if an older or malformed record
+        # cannot be rendered by the current summary formatter.
         self.raw.setPlainText(json.dumps(entry, indent=2, ensure_ascii=False))
+        self.human.clear()
+        try:
+            text = summary(entry.get('action', ''), entry)
+        except (AttributeError, TypeError, ValueError, KeyError):
+            self.human.setPlainText('Summary unavailable: this record contains invalid or unsupported fields. '
+                                    'Inspect the JSON tab; the log file has not been changed.')
+            return
+        self.human.setPlainText(text + '\n\nLog ID: ' + str(entry.get('run_id', '?'))
+                                + '\nStarted: ' + str(entry.get('started_at', '?'))
+                                + '\nLast update: ' + str(entry.get('updated_at', '?')))

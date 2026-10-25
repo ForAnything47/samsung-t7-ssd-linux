@@ -78,6 +78,26 @@ class LiveTests(unittest.TestCase):
         self.runner.completed.emit('status', {'complete': True, 'before': {'locked': True}})
         self.assertIn('Locked', self.window.heading.text())
 
+    def test_log_summary_failure_preserves_json_and_next_selection(self):
+        from gui.log_viewer import LogViewer
+        viewer = LogViewer(lambda day: None)
+        self.addCleanup(viewer.close)
+        bad = {'action': 'status', 'complete': True, 'before': 'invalid',
+               'run_id': 'bad', 'started_at': '2026-10-25T12:00:00+00:00'}
+        good = {'action': 'status', 'complete': True, 'before': {'locked': True},
+                'run_id': 'good', 'started_at': '2026-10-25T12:01:00+00:00'}
+        viewer.entries = [good, bad]
+        viewer.show_entry(0)
+        self.assertIn('Locked', viewer.human.toPlainText())
+        viewer.show_entry(1)
+        self.assertIn('Summary unavailable', viewer.human.toPlainText())
+        self.assertNotIn('Locked', viewer.human.toPlainText())
+        import json
+        self.assertEqual(json.loads(viewer.raw.toPlainText()), bad)
+        viewer.show_entry(0)
+        self.assertIn('Locked', viewer.human.toPlainText())
+        self.assertEqual(json.loads(viewer.raw.toPlainText()), good)
+
     def test_log_viewer_selects_date_and_reads_without_ssd_operation(self):
         self.listed()
         self.window.open_logs()
