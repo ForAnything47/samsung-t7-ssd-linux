@@ -1,6 +1,6 @@
 """Password-change transaction and candidate-password verification."""
 
-import subprocess
+from t7manager.results import new_operation_result
 
 from t7manager import credentials as password_input, device as device_api, errors, protocol, records, transport
 
@@ -9,18 +9,8 @@ from t7manager import credentials as password_input, device as device_api, error
 # After a possible Set, verification failure leaves the result uncertain.
 def execute_password_change(info, serial, out, state, host=None):
     host = host or transport.Host()
-    result = {
-        "action": "change-password",
-        "complete": False,
-        "experimental": True,
-        "identity": info,
-        "commands": [],
-        "session_may_be_open": False,
-        "transaction_may_be_open": False,
-        "changes_may_have_occurred": False,
-        "commit_confirmed": False,
-        "relink_attempted": False,
-    }
+    result = new_operation_result("change-password", info)
+    result.update(experimental=True, commit_confirmed=False)
     current_password = new_password = None
     initial_generation = host.gen(info)
 
@@ -38,34 +28,8 @@ def execute_password_change(info, serial, out, state, host=None):
         command_record = {"name": name, "phase": "attempting"}
         result["commands"].append(command_record)
         checkpoint()
-        command = ["sg_raw", "--readonly", "--cmdset=1", "--timeout=30"]
-        if payload is not None:
-            command += ["--send=" + str(len(payload))]
-        else:
-            command += ["--request=" + str(request), "--outfile=-"]
-        command += [info["device"], *[f"{b:02x}" for b in cdb]]
-        try:
-            transport_result = host.run(
-                command,
-                input=payload or b"",
-                capture_output=True,
-                timeout=45,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            command_record["phase"] = "timeout"
-            checkpoint()
-            raise errors.Stop("transport_timeout_no_retry") from None
-        command_record.update(phase="returned", returncode=transport_result.returncode)
-        if request:
-            command_record["received"] = len(transport_result.stdout)
-        checkpoint()
-        if transport_result.returncode:
-            raise errors.Stop("transport_failed_no_retry")
-        if request:
-            if len(transport_result.stdout) != request:
-                raise errors.Stop("unexpected_receive_length")
-            return transport_result.stdout
+        return transport.transfer_command(host, info["device"], cdb, command_record,
+                                          checkpoint, payload=payload, request=request)
 
     def exchange(name, payload, sessions):
         raw = protocol.frame(payload, 4100, *sessions)

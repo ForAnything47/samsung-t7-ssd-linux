@@ -16,6 +16,9 @@ from .details import summary
 class LogViewer(QDialog):
     def __init__(self, request_day, parent=None):
         super().__init__(parent)
+        # The owner drops its reference on finished; do not leave the native
+        # dialog and its Python proxy style for interpreter shutdown cleanup.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.request_day = request_day
         self.setWindowTitle('T7 · Operation logs')
         self.resize(900, 600)
@@ -93,7 +96,7 @@ class LogViewer(QDialog):
             for entry in self.entries:
                 try:
                     when = datetime.fromisoformat(entry['started_at']).astimezone().strftime('%H:%M:%S')
-                except (KeyError, ValueError, TypeError):
+                except (KeyError, ValueError, TypeError, OverflowError, OSError):
                     when = '?'
                 outcome = 'Completed' if entry.get('complete') else entry.get('error') or 'Incomplete'
                 self.runs.addItem(f"{when}  {entry.get('action', '?')}  ·  {outcome}")

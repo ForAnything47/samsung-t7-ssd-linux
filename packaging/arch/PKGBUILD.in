@@ -1,6 +1,6 @@
 pkgname=samsung-t7-ssd-linux
 pkgver=0.1.0.dev1
-pkgrel=13
+pkgrel=14
 pkgdesc='Unofficial Samsung T7 SSD password management for Linux'
 arch=('any')
 url='https://github.com/ForAnything47/samsung-t7-ssd-linux'

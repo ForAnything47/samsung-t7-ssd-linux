@@ -1,6 +1,6 @@
 """Initial password setup, removal and committed-removal verification."""
 
-import subprocess
+from t7manager.results import new_operation_result
 
 from t7manager import credentials as password_input, device as device_api, errors, protocol, records, transport
 
@@ -15,19 +15,9 @@ class SecuritySetupFlow:
         self.action, self.info, self.serial = action, info, serial
         self.out, self.state, self.host = out, state, host
         self.generation = host.gen(info)
-        self.result = dict(
-            action=action,
-            complete=False,
-            experimental=True,
-            identity=info,
-            commands=[],
-            session_may_be_open=False,
-            transaction_may_be_open=False,
-            changes_may_have_occurred=False,
-            commit_confirmed=False,
-            relink_attempted=False,
-            credential_bytes_saved=False,
-        )
+        self.result = new_operation_result(action, info)
+        self.result.update(experimental=True, commit_confirmed=False,
+                           credential_bytes_saved=False)
 
     def checkpoint(self):
         records.operation_checkpoint(self.state, self.result, self.out)
@@ -43,35 +33,8 @@ class SecuritySetupFlow:
         record = dict(name=name, phase="attempting")
         self.result["commands"].append(record)
         self.checkpoint()
-        command = ["sg_raw", "--readonly", "--cmdset=1", "--timeout=30"]
-        command += (
-            ["--send=" + str(len(payload))]
-            if payload is not None
-            else ["--request=" + str(request), "--outfile=-"]
-        )
-        command += [self.info["device"], *[f"{value:02x}" for value in cdb]]
-        try:
-            reply = self.host.run(
-                command,
-                input=payload or b"",
-                capture_output=True,
-                timeout=45,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            record["phase"] = "timeout"
-            self.checkpoint()
-            raise errors.Stop("transport_timeout_no_retry") from None
-        record.update(phase="returned", returncode=reply.returncode)
-        if request is not None:
-            record["received"] = len(reply.stdout)
-        self.checkpoint()
-        if reply.returncode:
-            raise errors.Stop("transport_failed_no_retry")
-        if request is not None:
-            if len(reply.stdout) != request:
-                raise errors.Stop("unexpected_receive_length")
-            return reply.stdout
+        return transport.transfer_command(self.host, self.info["device"], cdb, record,
+                                          self.checkpoint, payload=payload, request=request)
 
     def exchange(self, name, payload, sessions):
         packet = protocol.frame(payload, 4100, *sessions)

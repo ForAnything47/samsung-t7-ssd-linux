@@ -3,12 +3,12 @@ import json
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QLabel, QPushButton, QInputDialog, QLineEdit, QMessageBox, QHBoxLayout
 from .backend import CliRunner
-from .window import Window
+from .base_window import BaseWindow
 from .explanations import failure_explanation
 from .log_viewer import LogViewer
 
 
-class LiveWindow(Window):
+class LiveWindow(BaseWindow):
     def __init__(self, runner=None, auto_refresh=True):
         self.live_ready = False
         super().__init__()
@@ -22,22 +22,15 @@ class LiveWindow(Window):
         self.selected = None
         self.live_ready = True
         self.findChild(QLabel, 'banner').setText('DEVICE STATUS   ·   List: host only   ·   Status: explicit administrator authorization')
+        self.devices_label.setText('DEVICES')
+        self.footer.setText('Status sends a Discovery query. Password operations use the existing CLI checks and operation logs.\nDisplayed states are last observations.')
         for label in self.findChildren(QLabel):
-            if label.text() == 'SIMULATED DEVICES':
-                label.setText('DEVICES')
-            elif label.text() == 'Demo scenario':
-                label.hide()
-            elif label.text().startswith('No SSD commands are sent.'):
-                label.setText('Status sends a Discovery query. Password operations use the existing CLI checks and operation logs.\nDisplayed states are last observations.')
-            # Device strings are untrusted data, never rich text.
             label.setTextFormat(Qt.TextFormat.PlainText)
-        for control in (self.scenario, self.password, self.show_password, self.cancel):
-            control.hide()
         self.reset_button.setText('Refresh devices')
         self.logs_button = QPushButton('Operation logs')
         self.logs_button.setAccessibleName('View operation logs for selected device')
         self.logs_button.clicked.connect(self.open_logs)
-        title_row = self.centralWidget().layout().itemAt(0).layout()
+        title_row = self.title_row
         title_row.insertWidget(title_row.indexOf(self.settings_button), self.logs_button)
         self.unlock.setText('Refresh status')
         self.real_unlock = QPushButton('Unlock device')
@@ -68,18 +61,21 @@ class LiveWindow(Window):
         if auto_refresh:
             QTimer.singleShot(0, self.refresh_devices)
 
+    def build_controls(self, right):
+        from PySide6.QtWidgets import QCheckBox
+        self.unverified = QCheckBox()
+        right.addWidget(self.unverified)
+        self.action_row = QHBoxLayout()
+        self.unlock = QPushButton('Refresh status')
+        self.unlock.setObjectName('primary')
+        self.unlock.clicked.connect(self.start)
+        self.action_row.addWidget(self.unlock)
+        right.addLayout(self.action_row)
+        self.devices.currentRowChanged.connect(self.select_device)
+        self.reset_button.clicked.connect(self.refresh_devices)
+
     def unlock_row(self):
-        def find(layout):
-            for index in range(layout.count()):
-                item = layout.itemAt(index)
-                if item.widget() is self.unlock:
-                    return layout
-                if item.layout():
-                    result = find(item.layout())
-                    if result is not None:
-                        return result
-            return None
-        return find(self.centralWidget().layout())
+        return self.action_row
 
     def unlock_device(self):
         if self.live_busy or not self.selected or not self.real_unlock.isEnabled():
@@ -116,15 +112,6 @@ class LiveWindow(Window):
         password = None
         self.message.setText('Waiting for CLI completion. Do not disconnect the SSD.' if accepted else 'Cancelling before authentication…')
         self.append_detail('Password submitted through private pipe; waiting for operation result.' if accepted else 'Password input cancelled before authentication.')
-
-    def reset_demo(self, *args):
-        if not self.live_ready:
-            return super().reset_demo(*args)
-        # Both the list selection signal and refresh button use this slot.
-        if self.sender() is self.devices:
-            self.select_device()
-        else:
-            self.refresh_devices()
 
     def refresh_devices(self):
         if self.live_busy:
@@ -238,7 +225,7 @@ class LiveWindow(Window):
 
     def render(self, *_):
         if not getattr(self, 'live_ready', False):
-            return super().render()
+            return
         unknown = bool(self.selected and self.selected['model'] != 'PSSD T7 Shield')
         self.unverified.setVisible(unknown)
         self.unverified.setEnabled(not self.live_busy)

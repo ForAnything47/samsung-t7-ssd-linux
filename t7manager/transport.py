@@ -52,3 +52,39 @@ class QueryHost:
     idle = staticmethod(safety.require_idle)
     claim = staticmethod(safety.exclusive_device)
     run = staticmethod(subprocess.run)
+
+
+def transfer_command(host, device, cdb, record, checkpoint, *, payload=None,
+                     request=None, exact_length=True):
+    """Execute once after the caller's identity checks and attempt checkpoint.
+
+    Callers own protocol ordering and uncertainty flags. Unlock historically
+    permits short replies for its parser, whereas password operations require
+    the requested length. Keep that policy explicit.
+    """
+    from t7manager import errors
+    command = ['sg_raw', '--readonly', '--cmdset=1', '--timeout=30']
+    if payload is not None:
+        command += ['--send=' + str(len(payload))]
+    elif request is not None:
+        command += ['--request=' + str(request), '--outfile=-']
+    command += [device, *[f'{value:02x}' for value in cdb]]
+    try:
+        reply = host.run(command, input=payload if payload is not None else b'',
+                         capture_output=True, timeout=45, check=False)
+    except subprocess.TimeoutExpired:
+        record['phase'] = 'timeout'
+        checkpoint()
+        raise errors.Stop('transport_timeout_no_retry') from None
+    record.update(phase='returned', returncode=reply.returncode)
+    if request is not None:
+        record['received'] = len(reply.stdout)
+    checkpoint()
+    if reply.returncode:
+        raise errors.Stop('transport_failed_no_retry')
+    if request is not None:
+        if exact_length and len(reply.stdout) != request:
+            raise errors.Stop('unexpected_receive_length')
+        if not exact_length and len(reply.stdout) > request:
+            raise errors.Stop('oversized_response')
+        return reply.stdout

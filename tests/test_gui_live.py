@@ -44,11 +44,44 @@ class LiveTests(unittest.TestCase):
     def tearDown(self):
         self.window.live_busy = False
         self.window.close()
+        self.window.deleteLater()
+        from PySide6.QtCore import QCoreApplication, QEvent
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def listed(self, model='PSSD T7 Shield'):
         self.window.refresh_devices()
         self.runner.completed.emit('list', {'complete': True, 'candidates': [
             {'model': model, 'device': '/dev/fake', 'serials': ['TEST-SERIAL']}]})
+
+    def test_live_window_has_no_demo_runtime(self):
+        from gui.base_window import BaseWindow
+        from gui.window import Window
+        self.assertIsInstance(self.window, BaseWindow)
+        self.assertNotIsInstance(self.window, Window)
+        for name in ('model', 'timer', 'scenario', 'password'):
+            self.assertFalse(hasattr(self.window, name), name)
+        self.assertIs(self.window.unlock_row(), self.window.action_row)
+
+    def test_worker_events_dispatch_once_and_validate_result_action(self):
+        from gui.backend import CliRunner
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        # Exercise state transitions without creating/replacing native QObjects.
+        runner = SimpleNamespace(process=Mock(), operation_dispatched=False,
+                                 session_mode=True, authorization_seconds=60,
+                                 action='status', busy=True, output=bytearray(), completed=Mock())
+        runner.dispatch_initial = lambda: CliRunner.dispatch_initial(runner)
+        runner.deliver = lambda report: CliRunner.deliver(runner, report)
+        CliRunner.handle_event(runner, {'event': 'session_ready', 'seconds': 60})
+        CliRunner.handle_event(runner, {'event': 'worker_started'})
+        runner.process.write.assert_called_once_with(b'{"start": true}\n')
+        with self.assertRaises(ValueError):
+            CliRunner.handle_event(runner, {'event': 'result', 'report': {'action': 'unlock'}})
+        runner.completed.emit.assert_not_called()
+        report = {'action': 'status', 'complete': True}
+        CliRunner.handle_event(runner, {'event': 'result', 'report': report})
+        runner.completed.emit.assert_called_once_with('status', report)
+        self.assertFalse(runner.busy)
 
     def test_no_automatic_status_and_single_selection(self):
         self.listed()
@@ -78,10 +111,35 @@ class LiveTests(unittest.TestCase):
         self.runner.completed.emit('status', {'complete': True, 'before': {'locked': True}})
         self.assertIn('Locked', self.window.heading.text())
 
+    def test_log_windows_are_destroyed_on_close_and_process_exits_cleanly(self):
+        import subprocess
+        import sys
+        script = """
+from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QCoreApplication, QEvent
+from gui.log_viewer import LogViewer
+from shiboken6 import isValid
+app = QApplication([])
+for _ in range(5):
+    viewer = LogViewer(lambda day: None)
+    viewer.show()
+    app.processEvents()
+    viewer.close()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert not isValid(viewer), 'Closed log dialog still owns native objects'
+"""
+        result = subprocess.run([sys.executable, '-c', script], capture_output=True,
+                                text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_log_summary_failure_preserves_json_and_next_selection(self):
         from gui.log_viewer import LogViewer
         viewer = LogViewer(lambda day: None)
-        self.addCleanup(viewer.close)
+        def dispose_viewer():
+            viewer.close()
+            from PySide6.QtCore import QCoreApplication, QEvent
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.addCleanup(dispose_viewer)
         bad = {'action': 'status', 'complete': True, 'before': 'invalid',
                'run_id': 'bad', 'started_at': '2026-10-25T12:00:00+00:00'}
         good = {'action': 'status', 'complete': True, 'before': {'locked': True},

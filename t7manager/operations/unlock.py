@@ -1,5 +1,7 @@
 """Unlock/status state machine, including guarded unmount and one Relink."""
 
+from t7manager.results import new_operation_result
+
 import subprocess
 
 from t7manager import errors, protocol, records, safety, transport
@@ -12,16 +14,7 @@ def execute_unlock(info, serial, action, out, state, host=None):
     host = host or transport.Host()
     if out is not None:
         out.mkdir(parents=True, exist_ok=False, mode=448)
-    report = {
-        "complete": False,
-        "action": action,
-        "identity": info,
-        "commands": [],
-        "session_may_be_open": False,
-        "transaction_may_be_open": False,
-        "changes_may_have_occurred": False,
-        "relink_attempted": False,
-    }
+    report = new_operation_result(action, info)
     current_identity = info
     initial_generation = host.gen(current_identity)
 
@@ -63,34 +56,9 @@ def execute_unlock(info, serial, action, out, state, host=None):
         if name == "relink":
             report["relink_attempted"] = True
         checkpoint()
-        command = ["sg_raw", "--readonly", "--cmdset=1", "--timeout=30"]
-        if payload is not None:
-            command += ["--send=" + str(len(payload))]
-        elif request:
-            command += ["--request=" + str(request), "--outfile=-"]
-        command += [current_identity["device"], *[f"{b:02x}" for b in cdb]]
-        try:
-            transport_result = host.run(
-                command,
-                input=payload if payload is not None else b"",
-                capture_output=True,
-                timeout=45,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            command_record["phase"] = "timeout"
-            checkpoint()
-            raise errors.Stop("transport_timeout_no_retry") from None
-        command_record.update(phase="returned", returncode=transport_result.returncode)
-        if request:
-            command_record["received"] = len(transport_result.stdout)
-        checkpoint()
-        if transport_result.returncode:
-            raise errors.Stop("transport_failed_no_retry")
-        if request:
-            if len(transport_result.stdout) > request:
-                raise errors.Stop("oversized_response")
-            return transport_result.stdout
+        return transport.transfer_command(host, current_identity["device"], cdb, command_record,
+                                          checkpoint, payload=payload, request=request,
+                                          exact_length=False)
 
     def exchange(name, payload, sessions):
         packet = protocol.frame(payload, 4100, *sessions)

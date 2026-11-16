@@ -10,7 +10,8 @@ t7manager/
   protocol.py               TCG encoding, parsing and response validation
   device.py                 Device identity and generation checks
   safety.py                 Usage, mount and local output checks
-  transport.py              Device I/O and user input adapter
+  transport.py              Device I/O, shared transfer execution and user input adapter
+  results.py                Initial operation result schema and factory
   records.py                Atomic operation logs and per-device file lock
   paths.py                  Application-root path policy
   credentials.py            Hidden terminal input
@@ -26,7 +27,8 @@ t7manager/
 gui/
   live.py                   Real-device window
   backend.py                Privileged worker communication
-  window.py                 Demo and shared details widgets
+  base_window.py            Shared layout, settings and details presentation
+  window.py                 Demo-only controls and simulation
   details_window.py        Resizable operation details window
   log_viewer.py            Read-only operation log window
   preferences.py           Theme and authorization-session settings

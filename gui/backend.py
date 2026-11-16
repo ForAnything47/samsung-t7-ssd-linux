@@ -113,28 +113,32 @@ class CliRunner(QObject):
                 self.event_buffer = bytearray(rest)
                 try:
                     event = json.loads(line)
-                    if event.get('event') == 'worker_started':
-                        self.worker_started = True
-                        self.dispatch_initial()
-                    elif event.get('event') == 'session_ready' and self.session_mode:
-                        self.worker_started = True
-                        self.session_deadline = time.monotonic() + min(int(event['seconds']), self.authorization_seconds) - 1
-                        self.dispatch_initial()
-                    elif event.get('event') == 'password_required' and not self.awaiting_password:
-                        self.prompt = event.get('prompt', 'current')
-                        if self.prompt not in ('current', 'new', 'confirm'):
-                            raise ValueError()
-                        self.awaiting_password = True
-                        self.password_required.emit()
-                    elif event.get('event') == 'result' and isinstance(event.get('report'), dict):
-                        self.final_report = event['report']
-                        if self.final_report.get('action') != self.action:
-                            raise ValueError()
-                        if self.session_mode:
-                            self.deliver(self.final_report)
+                    self.handle_event(event)
                 except (ValueError, AttributeError, KeyError, TypeError):
                     self.overflow = True
         self.overflow |= len(data) > room
+
+    def handle_event(self, event):
+        """Apply one decoded worker event to the current operation."""
+        if event.get('event') == 'worker_started':
+            self.worker_started = True
+            self.dispatch_initial()
+        elif event.get('event') == 'session_ready' and self.session_mode:
+            self.worker_started = True
+            self.session_deadline = time.monotonic() + min(int(event['seconds']), self.authorization_seconds) - 1
+            self.dispatch_initial()
+        elif event.get('event') == 'password_required' and not self.awaiting_password:
+            self.prompt = event.get('prompt', 'current')
+            if self.prompt not in ('current', 'new', 'confirm'):
+                raise ValueError()
+            self.awaiting_password = True
+            self.password_required.emit()
+        elif event.get('event') == 'result' and isinstance(event.get('report'), dict):
+            self.final_report = event['report']
+            if self.final_report.get('action') != self.action:
+                raise ValueError()
+            if self.session_mode:
+                self.deliver(self.final_report)
 
     def dispatch_initial(self):
         if not self.operation_dispatched:

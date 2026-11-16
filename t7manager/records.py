@@ -241,7 +241,10 @@ def read_operation_logs(info, day=None):
                 continue
             try:
                 local_day = datetime.fromisoformat(record["started_at"]).astimezone().date().isoformat()
-            except (KeyError, ValueError, TypeError):
+            except (KeyError, ValueError, TypeError, OverflowError, OSError):
+                skipped_count += 1
+                if len(warnings) < 100:
+                    warnings.append({"file": name, "reason": "invalid_log_timestamp"})
                 continue
             dates.add(local_day)
             if day is None and (selected_day is None or local_day > selected_day):
