@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--demo', action='store_true', help='Use simulated devices; send no SSD commands')
     args = parser.parse_args()
     try:
+        from PySide6.QtCore import Qt
         from PySide6.QtWidgets import QApplication
         from gui.window import Window
     except ModuleNotFoundError as exc:
@@ -29,6 +30,9 @@ def main():
     else:
         from gui.live import LiveWindow
         window = LiveWindow()
+    # Destroy the native widget tree on an accepted close while Qt still
+    # owns its event loop, before PySide starts interpreter cleanup.
+    window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
     window.show()
     return app.exec()
 

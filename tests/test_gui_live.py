@@ -111,6 +111,39 @@ class LiveTests(unittest.TestCase):
         self.runner.completed.emit('status', {'complete': True, 'before': {'locked': True}})
         self.assertIn('Locked', self.window.heading.text())
 
+    def test_launcher_destroys_main_window_before_interpreter_shutdown(self):
+        import subprocess
+        import sys
+        from pathlib import Path
+        script = """
+import sys
+from unittest.mock import patch
+from PySide6.QtCore import QTimer
+from shiboken6 import isValid
+from gui.live import LiveWindow
+from gui.window import Window
+from t7_gui import main
+window_type = Window if '--demo' in sys.argv else LiveWindow
+original_init = window_type.__init__
+windows = []
+def start_and_close(window):
+    if window_type is LiveWindow:
+        original_init(window, auto_refresh=False)
+    else:
+        original_init(window)
+    windows.append(window)
+    QTimer.singleShot(0, window.close)
+with patch.object(window_type, '__init__', start_and_close):
+    assert main() == 0
+assert len(windows) == 1 and not isValid(windows[0])
+"""
+        for args in ([], ['--demo']):
+            with self.subTest(args=args):
+                result = subprocess.run([sys.executable, '-c', script, *args],
+                                        cwd=Path(__file__).resolve().parents[1],
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_log_windows_are_destroyed_on_close_and_process_exits_cleanly(self):
         import subprocess
         import sys
